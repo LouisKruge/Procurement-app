@@ -7,7 +7,7 @@ import {
 
 /* =========================================================================
    PROCUREMENT PLATFORM — unified app, three switchable design systems
-   Live backend: n8n webhooks · Local fallback: localStorage
+   Live backend: n8n webhooks · Local fallback: window.storage
    ========================================================================= */
 const N8N = "https://stefan90.app.n8n.cloud/webhook";
 const EP = {
@@ -61,11 +61,19 @@ const THEMES = {
 const THEME_KEYS = Object.keys(THEMES);
 const FONT_LINK = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Oswald:wght@400;500;600;700&family=Saira+Semi+Condensed:wght@500;600;700&display=swap";
 
-const NS = "procure:";
+const _mem = {};
+const _hasWS = typeof window !== "undefined" && window.storage && typeof window.storage.get === "function";
 const store = {
-  async get(k, def) { try { const v = localStorage.getItem(NS + k); return v != null ? JSON.parse(v) : def; } catch { return def; } },
-  async set(k, v) { try { localStorage.setItem(NS + k, JSON.stringify(v)); } catch {} return true; },
-  async del(k) { try { localStorage.removeItem(NS + k); } catch {} },
+  async get(k, def) {
+    if (_hasWS) { try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : def; } catch { return k in _mem ? _mem[k] : def; } }
+    return k in _mem ? _mem[k] : def;
+  },
+  async set(k, v) {
+    _mem[k] = v;
+    if (_hasWS) { try { await window.storage.set(k, JSON.stringify(v)); } catch {} }
+    return true;
+  },
+  async del(k) { delete _mem[k]; if (_hasWS) { try { await window.storage.delete(k); } catch {} } },
 };
 const SEED_USERS = [
   { id: "u-admin", name: "Stefan Kruger", email: "admin@demo.com", password: "admin", role: "Admin" },
@@ -101,6 +109,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!document.getElementById("procure-fonts")) {
+      const l = document.createElement("link"); l.id = "procure-fonts"; l.rel = "stylesheet"; l.href = FONT_LINK; document.head.appendChild(l);
+    }
     (async () => {
       let us = await store.get("users", null);
       if (!us) { us = SEED_USERS; await store.set("users", us); }
@@ -430,7 +441,7 @@ function Shell({ T, themeKey, setTheme, user, users, setUsers, onLogout, onUpdat
     try { const r = await fetchJSON(EP.intake, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); await loadOrders(); return { ok: true, reference: r.reference, mode: "live" }; }
     catch {
       const ref = "RFQ-" + (payload.supplierCode || "SUP") + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
-      const row = { recordId: "loc-" + Math.random().toString(36).slice(2, 9), reference: ref, status: "Quote Requested", supplier: payload.supplier, supplierEmail: payload.supplierEmail, requesterName: payload.requesterName, requesterEmail: payload.requesterEmail, itemsSummary: payload.items.map((i) => i.qty + " x " + i.code + " - " + i.description).join("\n"), lineItems: payload.items, quotePdf: [], quotedTotal: null, poNumber: "", requestedAt: new Date().toISOString() };
+      const row = { recordId: "loc-" + Math.random().toString(36).slice(2, 9), reference: ref, status: "Quote Requested", supplier: payload.supplier, supplierEmail: payload.supplierEmail, requesterName: payload.requesterName, requesterEmail: payload.requesterEmail, jobNumber: payload.jobNumber || "", itemsSummary: payload.items.map((i) => i.qty + " x " + i.code + " - " + i.description).join("\n"), lineItems: payload.items, quotePdf: [], quotedTotal: null, poNumber: "", requestedAt: new Date().toISOString() };
       const next = [row, ...orders]; setOrders(next); await store.set("local_orders", next); return { ok: true, reference: ref, mode: "local" };
     }
   }, [orders, loadOrders]);
@@ -454,6 +465,7 @@ function Shell({ T, themeKey, setTheme, user, users, setUsers, onLogout, onUpdat
   const NAV = useMemo(() => [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ROLES },
     { id: "order", label: "New Request", icon: ShoppingCart, roles: ["Admin", "Requester"] },
+    { id: "quotes", label: "Quotes", icon: Inbox, roles: ["Admin", "Requester"] },
     { id: "approvals", label: "Approvals", icon: CheckSquare, roles: ["Admin", "GM", "Finance"] },
     { id: "orders", label: "Orders", icon: Package, roles: ROLES },
     { id: "suppliers", label: "Suppliers", icon: Building2, roles: ["Admin", "Requester", "GM", "Finance"] },
@@ -504,6 +516,7 @@ function Shell({ T, themeKey, setTheme, user, users, setUsers, onLogout, onUpdat
         <main style={{ flex: 1, padding: "26px 30px", overflow: "auto" }}>
           {view === "dashboard" && <Dashboard ctx={ctx} setView={setView} />}
           {view === "order" && <OrderModule ctx={ctx} />}
+          {view === "quotes" && <QuotesView ctx={ctx} />}
           {view === "approvals" && <Approvals ctx={ctx} />}
           {view === "orders" && <OrdersView ctx={ctx} />}
           {view === "suppliers" && <SuppliersView ctx={ctx} />}
@@ -634,7 +647,7 @@ function Dashboard({ ctx, setView }) {
 function OrderModule({ ctx }) {
   const { T, catalog, user, createOrder, showToast } = ctx;
   const [si, setSi] = useState(0); const [search, setSearch] = useState(""); const [cart, setCart] = useState({});
-  const [reqName, setReqName] = useState(user.name); const [reqEmail, setReqEmail] = useState(user.email); const [busy, setBusy] = useState(false);
+  const [reqName, setReqName] = useState(user.name); const [reqEmail, setReqEmail] = useState(user.email); const [jobNumber, setJobNumber] = useState(""); const [busy, setBusy] = useState(false);
   const supplier = catalog.suppliers[si] || null;
   const all = useMemo(() => supplier ? catalog.products.filter((p) => p.supplier === supplier.name) : [], [catalog, supplier]);
   const products = useMemo(() => { const q = search.toLowerCase().trim(); return q ? all.filter((p) => p.code.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)) : all; }, [all, search]);
@@ -644,9 +657,9 @@ function OrderModule({ ctx }) {
   const submit = async () => {
     if (!supplier || !items.length || !reqName.trim() || !/.+@.+\..+/.test(reqEmail)) { showToast("Add items and your details first.", "err"); return; }
     setBusy(true);
-    const r = await createOrder({ supplier: supplier.name, supplierCode: supplier.code, supplierEmail: supplier.email, requesterName: reqName.trim(), requesterEmail: reqEmail.trim(), items: items.map((i) => ({ code: i.code, description: i.description, qty: i.qty })) });
+    const r = await createOrder({ supplier: supplier.name, supplierCode: supplier.code, supplierEmail: supplier.email, requesterName: reqName.trim(), requesterEmail: reqEmail.trim(), jobNumber: jobNumber.trim(), items: items.map((i) => ({ code: i.code, description: i.description, qty: i.qty })) });
     setBusy(false);
-    if (r.ok) { showToast(`Request ${r.reference} sent${r.mode === "local" ? " (saved offline)" : ""}.`); setCart({}); } else showToast("Couldn't send the request.", "err");
+    if (r.ok) { showToast(`Request ${r.reference} sent${r.mode === "local" ? " (saved offline)" : ""}.`); setCart({}); setJobNumber(""); } else showToast("Couldn't send the request.", "err");
   };
   const colHead = { fontFamily: T.sig === "instrument" ? T.display : T.body, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: T.faint, fontWeight: 600 };
   return (
@@ -692,6 +705,7 @@ function OrderModule({ ctx }) {
           <span style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: T.accent }}>{money(total)}</span>
         </div>
         <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${T.line}` }}>
+          <div><FieldLabel T={T}>Job / reference number</FieldLabel><Input T={T} value={jobNumber} onChange={(e) => setJobNumber(e.target.value)} placeholder="e.g. JOB-2026-114 (optional)" /></div>
           <Input T={T} value={reqName} onChange={(e) => setReqName(e.target.value)} placeholder="Your name" />
           <Input T={T} value={reqEmail} onChange={(e) => setReqEmail(e.target.value)} placeholder="you@company.com" />
           <Btn T={T} kind="primary" onClick={submit} disabled={busy || !items.length} style={{ width: "100%", padding: 12 }}>{busy ? "Sending…" : "Send quote request"}</Btn>
@@ -715,15 +729,14 @@ function Approvals({ ctx }) {
     if (r.ok) { const msg = action === "approve" && r.poNumber ? `Approved → ${r.poNumber}` : action === "submit" ? "Sent for approval" : action === "reject" ? "Rejected" : action === "deliver" ? "Marked delivered" : "Done"; showToast(msg + (r.mode === "local" ? " (offline)" : "")); } else showToast("Action failed.", "err");
   };
   const cols = [
-    { key: "intake", title: "Quotes in", match: (o) => ["Quote Requested", "Quote Received"].includes(o.status), tk: "info" },
     { key: "pending", title: "Pending approval", match: (o) => o.status === "Pending Approval", tk: "warn" },
     { key: "approved", title: "Awaiting delivery", match: (o) => o.status === "Awaiting Delivery", tk: "cool" },
     { key: "done", title: "Closed", match: (o) => ["Delivered", "Rejected"].includes(o.status), tk: "ok" },
   ];
   return (
-    <div style={{ maxWidth: 1320 }}>
-      <p style={{ color: T.ink2, fontSize: 14, margin: "0 0 18px" }}>Review incoming quotes, approve or reject, and track to delivery.</p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, alignItems: "start" }}>
+    <div style={{ maxWidth: 1100 }}>
+      <p style={{ color: T.ink2, fontSize: 14, margin: "0 0 18px" }}>Approve or reject submitted quotes, and track approved orders to delivery.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, alignItems: "start" }}>
         {cols.map((col, ci) => {
           const list = orders.filter(col.match);
           return (
@@ -737,17 +750,14 @@ function Approvals({ ctx }) {
                 {list.length === 0 && <div style={{ padding: 20, textAlign: "center", color: T.faint, fontSize: 12, fontStyle: "italic", border: `1px dashed ${T.line}`, borderRadius: T.radiusSm }}>Nothing here</div>}
                 {list.map((o) => (
                   <Panel key={o.recordId} T={T} style={{ padding: 13 }}>
-                    <div style={{ fontFamily: T.mono, fontSize: 12.5, color: T.accent, fontWeight: 600 }}>{o.reference}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontFamily: T.mono, fontSize: 12.5, color: T.accent, fontWeight: 600 }}>{o.reference}</span>
+                      {o.jobNumber ? <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink2, background: T.surface2, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "1px 7px" }}>{o.jobNumber}</span> : null}
+                    </div>
                     <div style={{ fontSize: 13.5, fontWeight: 600, marginTop: 3 }}>{o.supplier}</div>
                     <div style={{ fontSize: 11.5, color: T.faint, marginTop: 4 }}>{o.requesterName} · {fmtDate(o.requestedAt)}</div>
                     {o.itemsSummary && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.ink2, background: T.sunk, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "7px 9px", marginTop: 8, whiteSpace: "pre-wrap", maxHeight: 80, overflowY: "auto" }}>{o.itemsSummary}</div>}
                     {o.quotePdf?.length > 0 && <a href={o.quotePdf[0].url} target="_blank" rel="noopener" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: T.info, textDecoration: "none", marginTop: 8, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "4px 9px" }}><FileText size={12} /> {o.quotePdf[0].name} <ExternalLink size={11} /></a>}
-                    {col.key === "intake" && o.status === "Quote Received" && (
-                      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.sunk, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "6px 10px" }}><span style={{ fontFamily: T.mono, color: T.faint, fontSize: 13 }}>R</span><input value={totals[o.recordId] ?? (o.quotedTotal ?? "")} onChange={(e) => setTotals((t) => ({ ...t, [o.recordId]: e.target.value }))} placeholder="Quoted total" style={{ flex: 1, background: "none", border: "none", color: T.ink, fontFamily: T.mono, fontSize: 13, outline: "none", width: "100%" }} /></div>
-                        <Btn T={T} kind="primary" disabled={busy[o.recordId]} onClick={() => { const t = parseFloat(String(totals[o.recordId]).replace(/[^0-9.]/g, "")); if (!t) { showToast("Enter the quoted total.", "err"); return; } run("submit", o, { quotedTotal: t }); }} style={{ width: "100%" }}>Send for approval</Btn>
-                      </div>)}
-                    {col.key === "intake" && o.status === "Quote Requested" && <div style={{ marginTop: 9, fontSize: 11, color: T.faint, fontStyle: "italic" }}>Awaiting supplier quote</div>}
                     {col.key === "pending" && (
                       <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
                         <div style={{ fontFamily: T.mono, fontSize: 15, fontWeight: 700 }}>{o.quotedTotal != null ? money(o.quotedTotal) : "—"} <span style={{ fontSize: 11, color: T.faint, fontWeight: 400 }}>quoted</span></div>
@@ -776,6 +786,71 @@ function Approvals({ ctx }) {
 }
 
 /* =========================================================================
+   QUOTES — requester's page: chase quotes, enter total, send for approval
+   ========================================================================= */
+function QuotesView({ ctx }) {
+  const { T, orders, decide, showToast, user } = ctx;
+  const [busy, setBusy] = useState({}); const [totals, setTotals] = useState({});
+  // Requesters see their own orders; Admin sees all
+  const mine = useMemo(() => {
+    const open = orders.filter((o) => ["Quote Requested", "Quote Received"].includes(o.status));
+    if (user.role === "Admin") return open;
+    return open.filter((o) => (o.requesterEmail || "").toLowerCase() === user.email.toLowerCase() || (o.requesterName || "").toLowerCase() === user.name.toLowerCase());
+  }, [orders, user]);
+  const run = async (o) => {
+    const t = parseFloat(String(totals[o.recordId]).replace(/[^0-9.]/g, ""));
+    if (!t) { showToast("Enter the quoted total first.", "err"); return; }
+    setBusy((b) => ({ ...b, [o.recordId]: true }));
+    const r = await decide("submit", o, { quotedTotal: t });
+    setBusy((b) => ({ ...b, [o.recordId]: false }));
+    if (r.ok) showToast(`Sent ${o.reference} for approval${r.mode === "local" ? " (offline)" : ""}.`); else showToast("Couldn't send for approval.", "err");
+  };
+  const cols = [
+    { key: "awaiting", title: "Awaiting supplier quote", match: (o) => o.status === "Quote Requested", tk: "faint" },
+    { key: "received", title: "Quotes in — ready to submit", match: (o) => o.status === "Quote Received", tk: "info" },
+  ];
+  return (
+    <div style={{ maxWidth: 980 }}>
+      <p style={{ color: T.ink2, fontSize: 14, margin: "0 0 18px" }}>Track your RFQs. When a supplier's quote arrives, enter the total and send it up for approval.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, alignItems: "start" }}>
+        {cols.map((col) => {
+          const list = mine.filter(col.match);
+          return (
+            <div key={col.key}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <span style={{ width: 9, height: 9, borderRadius: T.sig === "editorial" ? "50%" : 2, background: T[col.tk] }} />
+                <h3 style={{ fontFamily: T.sig === "instrument" ? T.display : T.body, fontSize: 12, textTransform: "uppercase", letterSpacing: ".05em", margin: 0, fontWeight: 700, flex: 1, color: T.ink2 }}>{col.title}</h3>
+                <span style={{ fontFamily: T.mono, fontSize: 12, color: T.faint, background: T.surface2, padding: "1px 8px", borderRadius: 10 }}>{list.length}</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {list.length === 0 && <div style={{ padding: 20, textAlign: "center", color: T.faint, fontSize: 12, fontStyle: "italic", border: `1px dashed ${T.line}`, borderRadius: T.radiusSm }}>Nothing here</div>}
+                {list.map((o) => (
+                  <Panel key={o.recordId} T={T} style={{ padding: 13 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontFamily: T.mono, fontSize: 12.5, color: T.accent, fontWeight: 600 }}>{o.reference}</span>
+                      {o.jobNumber ? <span style={{ fontFamily: T.mono, fontSize: 11, color: T.ink2, background: T.surface2, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "1px 7px" }}>{o.jobNumber}</span> : null}
+                    </div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, marginTop: 3 }}>{o.supplier}</div>
+                    <div style={{ fontSize: 11.5, color: T.faint, marginTop: 4 }}>{o.requesterName} · {fmtDate(o.requestedAt)}</div>
+                    {o.itemsSummary && <div style={{ fontFamily: T.mono, fontSize: 11, color: T.ink2, background: T.sunk, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "7px 9px", marginTop: 8, whiteSpace: "pre-wrap", maxHeight: 80, overflowY: "auto" }}>{o.itemsSummary}</div>}
+                    {o.quotePdf?.length > 0 && <a href={o.quotePdf[0].url} target="_blank" rel="noopener" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: T.info, textDecoration: "none", marginTop: 8, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "4px 9px" }}><FileText size={12} /> {o.quotePdf[0].name || "Quote PDF"} <ExternalLink size={11} /></a>}
+                    {col.key === "awaiting" && <div style={{ marginTop: 9, fontSize: 11, color: T.faint, fontStyle: "italic" }}>RFQ sent — waiting for the supplier to reply with a quote.</div>}
+                    {col.key === "received" && (
+                      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, background: T.sunk, border: `1px solid ${T.line2}`, borderRadius: T.radiusSm, padding: "6px 10px" }}><span style={{ fontFamily: T.mono, color: T.faint, fontSize: 13 }}>R</span><input value={totals[o.recordId] ?? (o.quotedTotal ?? "")} onChange={(e) => setTotals((t) => ({ ...t, [o.recordId]: e.target.value }))} placeholder="Quoted total from the PDF" style={{ flex: 1, background: "none", border: "none", color: T.ink, fontFamily: T.mono, fontSize: 13, outline: "none", width: "100%" }} /></div>
+                        <Btn T={T} kind="primary" disabled={busy[o.recordId]} onClick={() => run(o)} style={{ width: "100%" }}>Send for approval</Btn>
+                      </div>)}
+                  </Panel>
+                ))}
+              </div>
+            </div>);
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
    ORDERS
    ========================================================================= */
 function OrdersView({ ctx }) {
@@ -793,7 +868,7 @@ function OrdersView({ ctx }) {
         <div style={{ display: "grid", gridTemplateColumns: "150px 1fr 130px 120px 150px", gap: 12, padding: "11px 18px", background: T.surface2, borderBottom: `1px solid ${T.line}`, ...colHead }}><span>Reference</span><span>Supplier</span><span style={{ textAlign: "right" }}>Total</span><span>PO</span><span>Status</span></div>
         {filtered.length === 0 ? <Empty T={T} text="No orders match." /> : filtered.map((o) => (
           <div key={o.recordId} style={{ display: "grid", gridTemplateColumns: "150px 1fr 130px 120px 150px", gap: 12, padding: "12px 18px", alignItems: "center", borderBottom: `1px solid ${T.line2}`, fontSize: 13 }}>
-            <span style={{ fontFamily: T.mono, fontSize: 12, color: T.accent, fontWeight: 600 }}>{o.reference}</span>
+            <div><span style={{ fontFamily: T.mono, fontSize: 12, color: T.accent, fontWeight: 600 }}>{o.reference}</span>{o.jobNumber ? <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, marginTop: 2 }}>{o.jobNumber}</div> : null}</div>
             <div><div>{o.supplier}</div><div style={{ fontSize: 11, color: T.faint, marginTop: 2 }}>{o.requesterName} · {fmtDate(o.requestedAt)}</div></div>
             <span style={{ fontFamily: T.mono, fontSize: 12.5, textAlign: "right", color: o.quotedTotal != null ? T.ink : T.faint }}>{o.quotedTotal != null ? money(o.quotedTotal) : "—"}</span>
             <span style={{ fontFamily: T.mono, fontSize: 12, color: o.poNumber ? T.ok : T.faint }}>{o.poNumber || "—"}</span>
